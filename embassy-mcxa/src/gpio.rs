@@ -31,7 +31,7 @@ impl Iterator for BitIter {
     }
 }
 
-#[cfg(feature = "mcxa2xx")]
+#[cfg(any(feature = "mcxa1xx", feature = "mcxa2xx"))]
 const PORT_COUNT: usize = 5;
 #[cfg(feature = "mcxa5xx")]
 const PORT_COUNT: usize = 6;
@@ -244,26 +244,17 @@ pub struct AnyPin {
     port: u8,
     pin: u8,
     gpio: crate::pac::gpio::Gpio,
-    port_reg: crate::pac::port::Port,
     pcr_reg: Reg<Pcr, RW>,
     irq_bound: bool,
 }
 
 impl AnyPin {
     /// Create an `AnyPin` from raw components.
-    pub(crate) fn new(
-        port: u8,
-        pin: u8,
-        gpio: crate::pac::gpio::Gpio,
-        port_reg: crate::pac::port::Port,
-        pcr_reg: Reg<Pcr, RW>,
-        irq_bound: bool,
-    ) -> Self {
+    pub(crate) fn new(port: u8, pin: u8, gpio: crate::pac::gpio::Gpio, pcr_reg: Reg<Pcr, RW>, irq_bound: bool) -> Self {
         Self {
             port,
             pin,
             gpio,
-            port_reg,
             pcr_reg,
             irq_bound,
         }
@@ -285,11 +276,6 @@ impl AnyPin {
     }
 
     #[inline(always)]
-    fn port_reg(&self) -> crate::pac::port::Port {
-        self.port_reg
-    }
-
-    #[inline(always)]
     fn pcr_reg(&self) -> Reg<Pcr, RW> {
         self.pcr_reg
     }
@@ -308,8 +294,6 @@ pub(crate) trait SealedPin {
     fn pin(&self) -> u8;
 
     fn gpio(&self) -> crate::pac::gpio::Gpio;
-
-    fn port_reg(&self) -> crate::pac::port::Port;
 
     fn pcr_reg(&self) -> Reg<Pcr, RW>;
 
@@ -336,14 +320,7 @@ pub trait GpioPin: SealedPin + Sized + PeripheralType + Into<AnyPin> + 'static {
         // SAFETY: This is only called within the GpioPin trait, which is only
         // implemented within this module on valid pin peripherals and thus
         // has been verified to be correct.
-        AnyPin::new(
-            self.port(),
-            self.pin(),
-            self.gpio(),
-            self.port_reg(),
-            self.pcr_reg(),
-            false,
-        )
+        AnyPin::new(self.port(), self.pin(), self.gpio(), self.pcr_reg(), false)
     }
 }
 
@@ -361,11 +338,6 @@ impl SealedPin for AnyPin {
     #[inline(always)]
     fn gpio(&self) -> crate::pac::gpio::Gpio {
         self.gpio()
-    }
-
-    #[inline(always)]
-    fn port_reg(&self) -> crate::pac::port::Port {
-        self.port_reg()
     }
 
     #[inline(always)]
@@ -449,13 +421,15 @@ macro_rules! impl_gpio_pin {
                 }
 
                 #[inline(always)]
-                fn port_reg(&self) -> crate::pac::port::Port {
-                    crate::pac::[<PORT $port>]
-                }
-
-                #[inline(always)]
                 fn pcr_reg(&self) -> crate::pac::common::Reg<crate::pac::port::Pcr, crate::pac::common::RW> {
-                    self.port_reg().pcr($pin)
+                    #[cfg(feature = "mcxa1xx")]
+                    {
+                        crate::pac::[<PORT $port>].[<pcr $pin>]()
+                    }
+                    #[cfg(not(feature = "mcxa1xx"))]
+                    {
+                        crate::pac::[<PORT $port>].pcr($pin)
+                    }
                 }
 
                 #[inline(always)]
@@ -525,7 +499,6 @@ macro_rules! impl_gpio_pin {
                         self.port(),
                         self.pin(),
                         self.gpio(),
-                        self.port_reg(),
                         self.pcr_reg(),
                         false,
                     )
@@ -551,7 +524,6 @@ macro_rules! impl_gpio_pin {
                             this.port(),
                             this.pin(),
                             this.gpio(),
-                            this.port_reg(),
                             this.pcr_reg(),
                             true,
                         ))
@@ -674,7 +646,7 @@ impl<'d, M: Mode> Flex<'d, M> {
     /// Is the output pin set as high?
     #[inline]
     pub fn is_set_high(&self) -> bool {
-        #[cfg(feature = "mcxa2xx")]
+        #[cfg(any(feature = "mcxa1xx", feature = "mcxa2xx"))]
         let set = self.gpio().pdor().read().pdo(self.pin.pin_index() as usize);
         #[cfg(feature = "mcxa5xx")]
         let set = (self.gpio().pdor().read().0 & (1 << self.pin.pin_index())) != 0;

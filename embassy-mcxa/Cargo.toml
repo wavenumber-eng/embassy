@@ -13,6 +13,7 @@ publish = false
 
 [package.metadata.embassy]
 build = [
+    {target = "thumbv8m.main-none-eabihf", features = ["defmt", "unstable-pac", "mcxa1xx"]},
     {target = "thumbv8m.main-none-eabihf", features = ["defmt", "unstable-pac", "mcxa2xx"]},
     {target = "thumbv8m.main-none-eabihf", features = ["defmt", "unstable-pac", "mcxa5xx"]},
 ]
@@ -23,6 +24,7 @@ src_base_git = "https://github.com/embassy-rs/embassy/blob/$COMMIT/embassy-mcxa/
 
 features = ["defmt", "unstable-pac"]
 flavors = [
+    { name = "mcx-a156", target = "thumbv8m.main-none-eabihf", features = ["mcxa1xx"] },
     { name = "mcx-a256", target = "thumbv8m.main-none-eabihf", features = ["mcxa2xx"] },
     { name = "mcx-a577", target = "thumbv8m.main-none-eabihf", features = ["mcxa5xx"] },
 ]
@@ -162,6 +164,7 @@ unstable-osc32k = []
 #
 # Chip family selection
 #
+mcxa1xx = ["nxp-pac/mcxa156"]
 mcxa2xx = ["nxp-pac/mcxa256"]
 mcxa5xx = ["nxp-pac/mcxa577"]
 

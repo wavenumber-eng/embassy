@@ -16,6 +16,13 @@ mod mcxa2xx_exclusive {
     pub use crate::chips::mcxa2xx::init;
 }
 
+/// Module for MCXA1xx-specific HAL drivers.
+#[cfg(feature = "mcxa1xx")]
+#[path = "."]
+mod mcxa1xx_exclusive {
+    pub use crate::chips::mcxa1xx::init;
+}
+
 /// Module for MCXA5xx-specific HAL drivers
 #[cfg(feature = "mcxa5xx")]
 #[path = "."]
@@ -29,9 +36,12 @@ pub mod trace;
 pub mod adc;
 #[cfg(mcxa_cdog)]
 pub mod cdog;
-#[cfg(any(mcxa_mrcc5xx, mcxa_mrcc2xx))]
+#[cfg(all(not(feature = "mcxa1xx"), any(mcxa_mrcc5xx, mcxa_mrcc2xx)))]
 pub mod clkout; // TODO: Add dummy driver to metadata
-#[cfg(any(mcxa_mrcc5xx, mcxa_mrcc2xx))]
+#[cfg(all(feature = "mcxa1xx", mcxa_mrcc1xx))]
+#[path = "clocks/mcxa1xx.rs"]
+pub mod clocks;
+#[cfg(all(not(feature = "mcxa1xx"), any(mcxa_mrcc5xx, mcxa_mrcc2xx)))]
 pub mod clocks;
 pub mod config;
 #[cfg(mcxa_crc)]
@@ -42,12 +52,13 @@ pub mod ctimer;
 pub mod dma;
 #[cfg(feature = "executor-platform")]
 pub mod executor;
+#[cfg(not(feature = "mcxa1xx"))]
 pub mod flash; // TODO: Add dummy driver to metadata
 #[cfg(mcxa_can)]
 pub mod flexcan;
 #[cfg(mcxa_flexspi)]
 pub mod flexspi;
-#[cfg(mcxa_gpio)]
+#[cfg(any(mcxa_gpio, mcxa_gpio1xx))]
 pub mod gpio;
 #[cfg(mcxa_lpi2c)]
 pub mod i2c;
@@ -55,7 +66,7 @@ pub mod i2c;
 pub mod i3c;
 #[cfg(mcxa_inputmux)]
 pub mod inputmux;
-#[cfg(mcxa_lpuart)]
+#[cfg(any(mcxa_lpuart, mcxa_lpuart1xx))]
 pub mod lpuart;
 #[cfg(mcxa_ostimer)]
 pub mod ostimer;
@@ -77,6 +88,8 @@ pub mod trng;
 #[cfg(mcxa_wwdt)]
 pub mod wwdt;
 
+#[cfg(feature = "mcxa1xx")]
+pub use mcxa1xx_exclusive::*;
 #[cfg(feature = "mcxa2xx")]
 pub use mcxa2xx_exclusive::*;
 #[cfg(feature = "mcxa5xx")]
@@ -103,7 +116,9 @@ pub(crate) use nxp_pac as pac;
 
 pub use crate::_generated::{Peripherals, interrupt, peripherals};
 
-const HALS_SELECTED: usize = const { cfg!(feature = "mcxa2xx") as usize + cfg!(feature = "mcxa5xx") as usize };
+const HALS_SELECTED: usize = const {
+    cfg!(feature = "mcxa1xx") as usize + cfg!(feature = "mcxa2xx") as usize + cfg!(feature = "mcxa5xx") as usize
+};
 
 /// Ensure exactly one chip feature is set.
 #[doc(hidden)]
