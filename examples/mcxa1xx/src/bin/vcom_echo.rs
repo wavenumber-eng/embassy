@@ -25,6 +25,6 @@ async fn main(_spawner: Spawner) {
 
     loop {
         let byte = uart.read_byte_blocking();
-        let _ = uart.write_byte(byte);
+        uart.blocking_write(&[byte]).unwrap();
     }
 }
