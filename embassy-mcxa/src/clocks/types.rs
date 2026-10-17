@@ -96,6 +96,10 @@ pub struct Clocks {
     /// `clk_45m` (2xx) or `clk_48` (5xx) is a 45MHz/48MHz clock, sourced from `fro_hf`.
     pub clk_hf_fundamental: Option<Clock>,
 
+    /// Nominal fixed48MHz peripheral output on MCXA156; not a USB accuracy claim.
+    #[cfg(feature = "_mcxa1xx")]
+    pub clk_48m: Option<Clock>,
+
     /// `fro_hf_div` is a configurable frequency clock, sourced from `fro_hf`.
     pub fro_hf_div: Option<Clock>,
 
@@ -246,6 +250,12 @@ impl Clocks {
             });
         }
         Ok(clk.frequency)
+    }
+
+    /// Ensure the A156 nominal48MHz output is active at the requested power state.
+    #[cfg(feature = "_mcxa1xx")]
+    pub fn ensure_clk_48m_active(&self, at_level: &PoweredClock) -> Result<u32, ClockError> {
+        self.ensure_clock_active(&self.clk_48m, "clk_48m", at_level)
     }
 
     /// Ensure the gated `fro_12m` clock is active and valid at the given power state.

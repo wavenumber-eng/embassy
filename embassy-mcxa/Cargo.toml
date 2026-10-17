@@ -100,7 +100,7 @@ grounded = { version = "0.2.1", features = ["cas", "critical-section"] }
 heapless = "0.9"
 maitake-sync = { version = "0.3.0", default-features = false, features = ["critical-section", "no-cache-pad"] }
 nb = "1.1.0"
-nxp-pac = { git = "https://github.com/embassy-rs/nxp-pac.git", rev = "52488ea8ddf6c19d6a84a48d906b2bb48c4193bf", features = ["rt"] }
+nxp-pac = { git = "https://github.com/wavenumber-eng/nxp-pac.git", rev = "932a84042e82edc8c4cceb5174fad202962a8467", features = ["rt"] }
 paste = "1.0.15"
 
 rand-core-06 = { package = "rand_core", version = "0.6" }
@@ -108,7 +108,7 @@ rand-core-09 = { package = "rand_core", version = "0.9" }
 rand-core-10 = { package = "rand_core", version = "0.10" }
 
 [build-dependencies]
-nxp-pac = { git = "https://github.com/embassy-rs/nxp-pac.git", rev = "52488ea8ddf6c19d6a84a48d906b2bb48c4193bf", default-features = false, features = ["metadata"] }
+nxp-pac = { git = "https://github.com/wavenumber-eng/nxp-pac.git", rev = "932a84042e82edc8c4cceb5174fad202962a8467", default-features = false, features = ["metadata"] }
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
 regex = "1.12.3"

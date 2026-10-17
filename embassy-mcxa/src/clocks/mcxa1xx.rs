@@ -3,13 +3,16 @@
 //! MCXA156 has distinct MRCC/SCG register layouts and clock selectors, so it
 //! does not use the MCXA2xx clock operator or its voltage/flash timing sequence. This
 //! module keeps the reset 12 MHz system clock and only configures the exact
-//! peripheral selectors needed by OSTIMER0 and LPUART0.
+//! peripheral selectors needed by OSTIMER0 and LPUART0. An opt-in nominal
+//! fixed48MHz FIRC peripheral output does not change the system clock.
 
 use core::cell::RefCell;
 use core::sync::atomic::AtomicUsize;
 
 use critical_section::CriticalSection;
 
+#[path = "mcxa1xx/firc48.rs"]
+mod firc48;
 #[path = "gate.rs"]
 mod gate;
 #[path = "types.rs"]
@@ -26,7 +29,14 @@ pub mod config {
     /// clock. Higher-frequency operating points are added only after their
     /// voltage and flash timing sequences are reconciled.
     #[derive(Default)]
-    pub struct ClocksConfig;
+    #[non_exhaustive]
+    pub struct ClocksConfig {
+        /// Enable the nominal fixed48MHz FIRC peripheral output.
+        ///
+        /// Preserves an already running FIRC's frequency and system/AHB clocks.
+        /// This does not qualify USB clock tolerance or enable USB0 itself.
+        pub enable_firc48m: bool,
+    }
 
     #[derive(Copy, Clone, PartialEq, Debug, Default)]
     #[non_exhaustive]
@@ -51,7 +61,7 @@ pub mod periph_helpers {
     use crate::pac::mrcc::{
         MrccLpuart0ClkdivHalt as ClkdivHalt, MrccLpuart0ClkdivReset as ClkdivReset,
         MrccLpuart0ClkdivUnstab as ClkdivUnstab, MrccLpuart0ClkselMux as LpuartClkselMux,
-        MrccOstimer0ClkselMux as OstimerClkselMux,
+        MrccOstimer0ClkselMux as OstimerClkselMux, MrccUsb0ClkselMux,
     };
 
     #[must_use]
@@ -106,6 +116,41 @@ pub mod periph_helpers {
     impl SPConfHelper for NoConfig {
         fn pre_enable_config(&self, _clocks: &Clocks) -> Result<PreEnableParts, ClockError> {
             Ok(PreEnableParts::empty())
+        }
+    }
+
+    /// Clock selection for USB0's nominal48MHz input.
+    ///
+    /// System clock initialization must first opt into the FIRC48MHz output.
+    /// Accuracy and board power qualification remain the USB driver's contract.
+    pub struct UsbfsConfig {
+        pub power: PoweredClock,
+    }
+
+    impl Default for UsbfsConfig {
+        fn default() -> Self {
+            Self {
+                power: PoweredClock::NormalEnabledDeepSleepDisabled,
+            }
+        }
+    }
+
+    impl SPConfHelper for UsbfsConfig {
+        fn pre_enable_config(&self, clocks: &Clocks) -> Result<PreEnableParts, ClockError> {
+            let freq = clocks.ensure_clk_48m_active(&self.power)?;
+            if freq != 48_000_000 {
+                return Err(ClockError::BadConfig {
+                    clock: "usb0",
+                    reason: "requires nominal48MHz",
+                });
+            }
+            crate::pac::MRCC0
+                .mrcc_usb0_clksel()
+                .write(|w| w.set_mux(MrccUsb0ClkselMux::ScgScgFirc48mhzClk));
+            Ok(PreEnableParts {
+                freq,
+                wake_guard: WakeGuard::for_power(&self.power),
+            })
         }
     }
 
@@ -221,44 +266,58 @@ pub(super) static CLOCKS: critical_section::Mutex<RefCell<Option<Clocks>>> =
 pub(super) static LIVE_HP_TOKENS: AtomicUsize = AtomicUsize::new(0);
 
 /// Initialize the clocks used by the MCXA156 development slice.
-pub fn init(_settings: config::ClocksConfig) -> Result<(), ClockError> {
+pub fn init(settings: config::ClocksConfig) -> Result<(), ClockError> {
+    // Serialize initialization through publication, including the new FIRC path.
+    // A failed startup must not publish a nominal clock as available.
     critical_section::with(|cs| {
         if CLOCKS.borrow_ref(cs).is_some() {
-            Err(ClockError::AlreadyInitialized)
-        } else {
-            Ok(())
+            return Err(ClockError::AlreadyInitialized);
         }
-    })?;
+        use crate::pac::scg::{SirccsrLk, Sircvld};
 
-    use crate::pac::scg::{SirccsrLk, Sircvld};
+        let scg0 = crate::pac::SCG0;
+        scg0.sirccsr().modify(|w| w.set_lk(SirccsrLk::WriteEnabled));
+        scg0.sirccsr().modify(|w| w.set_sirc_clk_periph_en(true));
+        scg0.sirccsr().modify(|w| w.set_lk(SirccsrLk::WriteDisabled));
+        while scg0.sirccsr().read().sircvld() != Sircvld::EnabledAndValid {}
 
-    let scg0 = crate::pac::SCG0;
-    scg0.sirccsr().modify(|w| w.set_lk(SirccsrLk::WriteEnabled));
-    scg0.sirccsr().modify(|w| w.set_sirc_clk_periph_en(true));
-    scg0.sirccsr().modify(|w| w.set_lk(SirccsrLk::WriteDisabled));
-    while scg0.sirccsr().read().sircvld() != Sircvld::EnabledAndValid {}
+        let active = PoweredClock::NormalEnabledDeepSleepDisabled;
+        let always = PoweredClock::AlwaysEnabled;
+        let fro12m = Clock {
+            frequency: 12_000_000,
+            power: active,
+        };
+        let mut clocks = Clocks::default();
+        clocks.fro_12m_root = Some(fro12m.clone());
+        clocks.fro_12m = Some(fro12m.clone());
+        clocks.fro_lf_div = Some(fro12m.clone());
+        clocks.clk_1m = Some(Clock {
+            frequency: 1_000_000,
+            power: always,
+        });
+        clocks.main_clk = Some(fro12m.clone());
+        clocks.cpu_system_clk = Some(fro12m);
 
-    let active = PoweredClock::NormalEnabledDeepSleepDisabled;
-    let always = PoweredClock::AlwaysEnabled;
-    let fro12m = Clock {
-        frequency: 12_000_000,
-        power: active,
-    };
-    let mut clocks = Clocks::default();
-    clocks.fro_12m_root = Some(fro12m.clone());
-    clocks.fro_12m = Some(fro12m.clone());
-    clocks.fro_lf_div = Some(fro12m.clone());
-    clocks.clk_1m = Some(Clock {
-        frequency: 1_000_000,
-        power: always,
-    });
-    clocks.main_clk = Some(fro12m.clone());
-    clocks.cpu_system_clk = Some(fro12m);
-
-    critical_section::with(|cs| {
+        if settings.enable_firc48m {
+            firc48::enable(&mut firc48::PacRegisters, firc48::STARTUP_POLLS).map_err(|error| {
+                ClockError::BadConfig {
+                    clock: "firc48m",
+                    reason: match error {
+                        firc48::Error::Fault => "FIRC error is pending",
+                        firc48::Error::SelectedButDisabled => "selected system source is disabled",
+                        firc48::Error::Configuration => "configuration did not read back",
+                        firc48::Error::Timeout => "bounded readiness poll expired",
+                    },
+                }
+            })?;
+            clocks.clk_48m = Some(Clock {
+                frequency: 48_000_000,
+                power: active,
+            });
+        }
         *CLOCKS.borrow_ref_mut(cs) = Some(clocks);
-    });
-    Ok(())
+        Ok(())
+    })
 }
 
 pub fn with_clocks<R: 'static, F: FnOnce(&Clocks) -> R>(f: F) -> Option<R> {

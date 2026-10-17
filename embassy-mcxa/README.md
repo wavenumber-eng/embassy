@@ -14,6 +14,18 @@ LPUART0. Full clock configuration, other peripheral drivers, the LPTMR time
 backend and the HAL low-power executor are not implemented for this part.
 The examples are under `examples/mcxa156`; probe VCOM is UART, not native USB.
 
+For peripheral clock preparation, set `config.clock_cfg.enable_firc48m = true`
+before `embassy_mcxa::init(config)`. This enables the nominal fixed 48 MHz
+FIRC output while preserving the 12 MHz system clock and an already running
+FIRC's frequency configuration. It does not enable USB0, establish USB clock
+tolerance, or provide a native USB driver. The option defaults to `false`.
+The FIRC startup protocol has a bounded readiness poll and reports faults;
+the existing SIRC initialization wait is unchanged.
+
+This USB development branch temporarily pins the reviewed USB0 metadata in
+the Wavenumber PAC fork. Replace that dependency with its upstream revision
+before requesting upstream review; base support uses the merged upstream PAC.
+
 Dedicated pins are excluded from safe HAL pin tokens unless their feature is
 enabled. Opted-in pins are initialized in the disabled GPIO state, consistent
 with the other MCXA implementations:
