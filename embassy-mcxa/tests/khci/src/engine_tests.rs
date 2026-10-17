@@ -18,6 +18,7 @@ struct Fake {
     barriers: usize,
     acknowledgments: Vec<u8>,
     token_on_ctl_write: Option<u8>,
+    reset_on_enable: bool,
 }
 
 impl Fake {
@@ -35,6 +36,7 @@ impl Fake {
             barriers: 0,
             acknowledgments: Vec::new(),
             token_on_ctl_write: None,
+            reset_on_enable: false,
         }
     }
 }
@@ -57,6 +59,9 @@ impl Io for Fake {
             && let Some(stat) = self.token_on_ctl_write.take()
         {
             self.fifo.push_back(stat);
+        }
+        if r == R::Ctl && value & 1 != 0 && self.ctl & 1 == 0 && self.reset_on_enable {
+            self.flags |= RESET;
         }
         match r {
             R::Ctl if !self.ignore_stop || value & 1 != 0 => self.ctl = value,
@@ -467,4 +472,43 @@ fn reset_invalidates_old_sleep_and_resume_events_in_the_same_snapshot() {
     assert_eq!(e.state.next_event(), Some(embassy_usb_driver::Event::Reset));
     assert_eq!(e.state.next_event(), None);
     assert_eq!(e.io.flags & (SLEEP | RESUME), 0);
+}
+
+#[test]
+fn recognized_reset_is_acknowledged_after_enable_without_reentering_reset_service() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.events = 0;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.io.flags = RESET;
+    e.io.reset_on_enable = true;
+    e.interrupt().unwrap();
+    assert_eq!(e.io.flags & RESET, 0);
+    assert!(!e.state.reset_ack_pending);
+    let resets = e.state.resets;
+    e.interrupt().unwrap();
+    assert_eq!(e.state.resets, resets);
+}
+
+#[test]
+fn ordinary_publication_does_not_hide_a_new_reset_generated_after_resume() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.events = 0;
+    state.channels[3].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.io.reset_on_enable = true;
+    assert!(e.begin(3, 0, Some(&[]), None).is_some());
+    assert_ne!(e.io.flags & RESET, 0, "unobserved resets must remain visible");
+    assert_eq!(e.state.events & RESET_EVENT, 0);
 }

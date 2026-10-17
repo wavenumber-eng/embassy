@@ -48,6 +48,7 @@ pub(super) struct Inner {
     pub notifications: u64,
     pub suspended: bool,
     pub reported_suspended: bool,
+    pub reset_ack_pending: bool,
 }
 
 impl Inner {
@@ -70,6 +71,7 @@ impl Inner {
             notifications: 0,
             suspended: false,
             reported_suspended: false,
+            reset_ack_pending: false,
         }
     }
 
@@ -146,6 +148,13 @@ impl<B: Io> Engine<'_, B> {
         let ctl = self.io.read(R::Ctl);
         self.io.write(R::Ctl, (ctl | ENABLE) & !TOKEN_BUSY);
         self.io.barrier();
+        // The SDK acknowledges reset with USB enabled. Do not suppress new
+        // post-resume resets unless this operation actually observed USBRST.
+        if self.state.reset_ack_pending {
+            self.io.write(R::Istat, RESET);
+            self.io.barrier();
+            self.state.reset_ack_pending = false;
+        }
     }
 
     /// Engine is paused or the peripheral is freshly reset, and the FIFO is empty.
@@ -158,7 +167,8 @@ impl<B: Io> Engine<'_, B> {
         self.state.setup_pending = false;
         self.state.out_packet = None;
         self.io.write(R::Addr, 0);
-        self.io.write(R::Ctl, ODDRST);
+        let ctl = self.io.read(R::Ctl) & !(ODDRST | TOKEN_BUSY);
+        self.io.write(R::Ctl, ctl | ODDRST);
         for s in 0..SLOTS {
             self.storage.set_control(s, 0);
             self.storage.set_address(s);
@@ -170,7 +180,7 @@ impl<B: Io> Engine<'_, B> {
         for n in 0..16 {
             self.io.write(R::Endpoint(n), 0);
         }
-        self.io.write(R::Ctl, 0);
+        self.io.write(R::Ctl, ctl);
         self.io.write(R::Errstat, 0xff);
         self.io.write(R::Erren, 0xff);
         self.io.write(R::Endpoint(0), 1 | 4 | 8);
@@ -396,7 +406,7 @@ impl<B: Io> Engine<'_, B> {
     fn account_paused(&mut self) -> Result<(), Fault> {
         let setup = self.drain()?;
         if self.io.read(R::Istat) & RESET != 0 {
-            self.io.write(R::Istat, RESET);
+            self.state.reset_ack_pending = true;
             self.reset_paused();
             self.state.events |= RESET_EVENT;
         } else if setup {
@@ -433,7 +443,7 @@ impl<B: Io> Engine<'_, B> {
             self.pause()?;
             let setup = self.drain()?;
             if self.io.read(R::Istat) & RESET != 0 {
-                self.io.write(R::Istat, RESET);
+                self.state.reset_ack_pending = true;
                 self.reset_paused();
                 self.state.events |= RESET_EVENT;
                 reset = true;
@@ -473,7 +483,7 @@ impl<B: Io> Engine<'_, B> {
         self.state.notify();
         let setup = self.drain()?;
         if self.io.read(R::Istat) & RESET != 0 {
-            self.io.write(R::Istat, RESET);
+            self.state.reset_ack_pending = true;
             self.reset_paused();
             self.state.events |= RESET_EVENT;
         } else {
@@ -511,7 +521,7 @@ impl<B: Io> Engine<'_, B> {
         self.pause()?;
         let setup = self.drain()?;
         if self.io.read(R::Istat) & RESET != 0 {
-            self.io.write(R::Istat, RESET);
+            self.state.reset_ack_pending = true;
             self.reset_paused();
             self.state.events |= RESET_EVENT;
         } else if setup {
