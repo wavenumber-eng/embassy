@@ -22,6 +22,7 @@ struct Fake {
     setup_on_endpoint_restore: bool,
     writes: Vec<(R, u8)>,
     late_setup_on_empty: Option<u8>,
+    completion_on_own: Option<(*const Storage, usize)>,
 }
 
 impl Fake {
@@ -43,6 +44,7 @@ impl Fake {
             setup_on_endpoint_restore: false,
             writes: Vec::new(),
             late_setup_on_empty: None,
+            completion_on_own: None,
         }
     }
 }
@@ -106,6 +108,16 @@ impl Io for Fake {
     }
     fn barrier(&mut self) {
         self.barriers += 1;
+        if let Some((pointer, index)) = self.completion_on_own {
+            // SAFETY: The test keeps this Storage alive and unmoved through
+            // begin(); the callback emulates DMA under the single test thread.
+            let storage = unsafe { &*pointer };
+            if storage.control(slot(index, false)) & OWN != 0 {
+                storage.set_control(slot(index, false), (1 << 16) | (9 << 2));
+                self.fifo.push_back(((index / 2) as u8) << 4 | 8);
+                self.completion_on_own = None;
+            }
+        }
     }
 }
 
@@ -396,7 +408,7 @@ fn setup_arriving_at_publication_boundary_prevents_old_in_own() {
     e.prime_out();
     storage.copy_in(slot(0, false), &[0; 8]);
     storage.set_control(slot(0, false), (8 << 16) | (13 << 2));
-    e.io.token_on_endpoint_disable = Some(0);
+    e.io.late_setup_on_empty = Some(0);
     let notifications = e.state.notifications;
     assert!(e.begin(1, 7, Some(&[9; 7]), Some(0)).is_none());
     assert_eq!(storage.control(slot(1, false)) & OWN, 0);
@@ -572,6 +584,9 @@ fn resume_clears_old_busy_before_acceptance_and_preserves_a_new_setup_busy_latch
         storage: &storage,
     };
     e.io.ctl = 33;
+    e.pause().unwrap();
+    e.state.setup_release_pending = true;
+    e.io.writes.clear();
     e.io.setup_on_endpoint_restore = true;
     e.begin(3, 0, Some(&[]), None).unwrap();
     assert_eq!(e.io.ctl & 33, 33, "new SETUP latch must survive resume");
@@ -693,7 +708,7 @@ fn tx_completion_during_rx_suspension_is_captured_before_another_publication() {
     };
     let (id, _) = e.begin(3, 1, Some(&[7]), None).unwrap();
     storage.set_control(slot(3, false), (1 << 16) | (9 << 2));
-    e.io.token_on_endpoint_disable = Some(0x18);
+    e.io.late_setup_on_empty = Some(0x18);
     e.begin(5, 1, Some(&[8]), None).unwrap();
     assert_eq!(e.state.channels[3].phase, Phase::Complete { id, length: 1 });
     assert!(e.io.fifo.is_empty());
@@ -750,4 +765,26 @@ fn setup_after_final_empty_fifo_read_keeps_busy_for_the_next_irq() {
     assert_eq!(e.state.setup_generation, 1);
     assert_eq!(e.io.ctl & 32, 0);
     assert!(e.state.setup_pending);
+}
+
+#[test]
+fn publication_accepts_its_matching_completion_before_begin_returns() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[3].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.io.completion_on_own = Some((&storage, 3));
+    let (id, _) = e.begin(3, 1, Some(&[7]), None).unwrap();
+    assert_eq!(e.state.channels[3].phase, Phase::Complete { id, length: 1 });
+    assert!(
+        !e.io
+            .writes
+            .iter()
+            .any(|&(r, _)| r == R::Ctl || matches!(r, R::Endpoint(_)))
+    );
 }

@@ -52,6 +52,7 @@ pub(super) struct Inner {
     pub suspended: bool,
     pub reported_suspended: bool,
     pub reset_ack_pending: bool,
+    pub setup_release_pending: bool,
     pub paused_endpoints: Option<[u8; 16]>,
     pub pause_mask: [u8; 16],
     pub trace: [[u32; 4]; 64],
@@ -81,6 +82,7 @@ impl Inner {
             suspended: false,
             reported_suspended: false,
             reset_ack_pending: false,
+            setup_release_pending: false,
             paused_endpoints: None,
             pause_mask: [0; 16],
             trace: [[0; 4]; 64],
@@ -229,8 +231,11 @@ impl<B: Io> Engine<'_, B> {
         let ctl = self.io.read(R::Ctl);
         // Clear the SETUP token-busy latch BEFORE restoring endpoint acceptance.
         // A newer SETUP arriving after restoration must retain its own latch.
-        self.io.write(R::Ctl, (ctl | ENABLE) & !TOKEN_BUSY);
-        self.io.barrier();
+        if ctl & ENABLE == 0 || self.state.setup_release_pending {
+            self.io.write(R::Ctl, (ctl | ENABLE) & !TOKEN_BUSY);
+            self.io.barrier();
+            self.state.setup_release_pending = false;
+        }
         if self.state.reset_ack_pending {
             self.io.write(R::Istat, RESET);
             self.io.barrier();
@@ -256,6 +261,7 @@ impl<B: Io> Engine<'_, B> {
         self.io.write(R::Istat, SLEEP | RESUME | STALL | ERROR);
         self.state.setup_generation = self.state.setup_generation.checked_add(1).expect("USB epoch exhausted");
         self.state.setup_pending = false;
+        self.state.setup_release_pending = false;
         self.state.out_packet = None;
         self.io.write(R::Addr, 0);
         let ctl = self.io.read(R::Ctl) & !(ODDRST | TOKEN_BUSY);
@@ -336,13 +342,22 @@ impl<B: Io> Engine<'_, B> {
         if !self.state.active || self.state.fault.is_some() {
             return None;
         }
-        self.pause_rx().ok()?;
         self.account_paused().ok()?;
         let result = if setup.is_some_and(|g| g != self.state.setup_generation) {
             None
         } else {
             self.publish(index, length, data)
         };
+        // A SETUP accepted during publication holds the engine in hardware.
+        // Account for it before returning the ticket; never release an
+        // unobserved SETUP hold, even if it arrives after this second drain.
+        self.account_paused().ok()?;
+        let result = result.filter(|(id, generation)| {
+            let c = self.state.channels[index];
+            c.generation == *generation
+                && matches!(c.phase, Phase::Published { id: current, .. } | Phase::Complete { id: current, .. } if current == *id)
+                && setup.is_none_or(|g| g == self.state.setup_generation)
+        });
         self.resume();
         result
     }
@@ -506,12 +521,15 @@ impl<B: Io> Engine<'_, B> {
         self.state.out_packet = None;
         self.write_endpoint(0, 1 | 4 | 8);
         self.prime_out();
+        self.state.setup_release_pending = true;
         Ok(())
     }
 
     fn account_paused(&mut self) -> Result<(), Fault> {
         let setup = self.drain()?;
         if self.io.read(R::Istat) & RESET != 0 {
+            self.pause_rx()?;
+            self.drain()?;
             self.state.reset_ack_pending = true;
             self.reset_paused();
             self.state.events |= RESET_EVENT;
