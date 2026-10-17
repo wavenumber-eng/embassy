@@ -136,9 +136,6 @@ async fn echo(mut cdc: CdcAcmClass<'static, Driver<'static>>) {
             if cdc.write_packet(&data[..length]).await.is_err() {
                 break;
             }
-            if length == 64 && cdc.write_packet(&[]).await.is_err() {
-                break;
-            }
         }
     }
 }
