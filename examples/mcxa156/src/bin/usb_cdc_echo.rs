@@ -146,43 +146,43 @@ async fn echo(mut cdc: CdcAcmClass<'static, Driver<'static>>) {
 async fn monitor(mut uart: Lpuart<'static, Blocking>, mut led: Output<'static>) {
     Timer::after(Duration::from_secs(3)).await;
     print_snapshot(&mut uart, "clock-running", clock_snapshot());
-    let counters = khci::diagnostic_counters();
-    uart.write_str_blocking("usb-running");
-    for (name, value) in [" RESETS=", " TOKENS=", " PAUSES=", " ERRORS=", " ERROR_BITS="]
-        .into_iter()
-        .zip(counters)
-    {
-        print_word(&mut uart, name, value);
-    }
-    let snapshot = cortex_m::interrupt::free(|_| {
-        let mrcc = hal::pac::MRCC0;
-        if !mrcc.mrcc_glb_cc0().read().usb0() || !mrcc.mrcc_glb_rst0().read().usb0() {
-            return None;
-        }
-        let usb = hal::pac::USB0;
-        Some([
-            usb.ctl().read().0 as u32,
-            usb.istat().read().0 as u32,
-            usb.addr().read().0 as u32,
-            usb.frmnuml().read().0 as u32,
-        ])
-    });
-    if let Some(snapshot) = snapshot {
-        for (name, value) in [" CTL=", " ISTAT=", " ADDR=", " FRAME="].into_iter().zip(snapshot) {
+    loop {
+        let counters = khci::diagnostic_counters();
+        uart.write_str_blocking("usb-running");
+        for (name, value) in [" RESETS=", " TOKENS=", " PAUSES=", " ERRORS=", " ERROR_BITS="]
+            .into_iter()
+            .zip(counters)
+        {
             print_word(&mut uart, name, value);
         }
-    }
-    uart.write_str_blocking("\r\n");
-    let (trace, count) = khci::diagnostic_trace();
-    for event in &trace[..count] {
-        uart.write_str_blocking("usb-trace");
-        for (name, value) in [" TYPE=", " A=", " B=", " C="].into_iter().zip(*event) {
-            print_word(&mut uart, name, value);
+        let snapshot = cortex_m::interrupt::free(|_| {
+            let mrcc = hal::pac::MRCC0;
+            if !mrcc.mrcc_glb_cc0().read().usb0() || !mrcc.mrcc_glb_rst0().read().usb0() {
+                return None;
+            }
+            let usb = hal::pac::USB0;
+            Some([
+                usb.ctl().read().0 as u32,
+                usb.istat().read().0 as u32,
+                usb.addr().read().0 as u32,
+                usb.frmnuml().read().0 as u32,
+            ])
+        });
+        if let Some(snapshot) = snapshot {
+            for (name, value) in [" CTL=", " ISTAT=", " ADDR=", " FRAME="].into_iter().zip(snapshot) {
+                print_word(&mut uart, name, value);
+            }
         }
         uart.write_str_blocking("\r\n");
-    }
-    loop {
+        let (trace, count) = khci::diagnostic_trace();
+        for event in &trace[..count] {
+            uart.write_str_blocking("usb-trace");
+            for (name, value) in [" TYPE=", " A=", " B=", " C="].into_iter().zip(*event) {
+                print_word(&mut uart, name, value);
+            }
+            uart.write_str_blocking("\r\n");
+        }
         led.toggle();
-        Timer::after(Duration::from_millis(500)).await;
+        Timer::after(Duration::from_secs(3)).await;
     }
 }

@@ -56,6 +56,7 @@ pub(super) struct Inner {
     pub pause_mask: [u8; 16],
     pub trace: [[u32; 4]; 64],
     pub trace_count: usize,
+    pub trace_next: usize,
 }
 
 impl Inner {
@@ -84,14 +85,14 @@ impl Inner {
             pause_mask: [0; 16],
             trace: [[0; 4]; 64],
             trace_count: 0,
+            trace_next: 0,
         }
     }
 
     pub fn record(&mut self, event: [u32; 4]) {
-        if self.trace_count < self.trace.len() {
-            self.trace[self.trace_count] = event;
-            self.trace_count += 1;
-        }
+        self.trace[self.trace_next] = event;
+        self.trace_next = (self.trace_next + 1) % self.trace.len();
+        self.trace_count = (self.trace_count + 1).min(self.trace.len());
     }
 
     pub fn id(&mut self) -> u64 {

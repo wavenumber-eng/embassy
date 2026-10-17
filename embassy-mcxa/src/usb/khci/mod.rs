@@ -56,10 +56,16 @@ pub fn diagnostic_counters() -> [u32; 5] {
     })
 }
 
-/// Read-only bounded trace of the first controller events for bench diagnostics.
+/// Read-only bounded trace of the latest controller events for bench diagnostics.
 #[cfg(feature = "unstable-pac")]
 pub fn diagnostic_trace() -> ([[u32; 4]; 64], usize) {
-    with_engine(|e| (e.state.trace, e.state.trace_count))
+    with_engine(|e| {
+        let first = (e.state.trace_next + 64 - e.state.trace_count) % 64;
+        (
+            core::array::from_fn(|i| e.state.trace[(first + i) % 64]),
+            e.state.trace_count,
+        )
+    })
 }
 
 /// Explicit bench configuration; automatic VBUS detection is not available.
