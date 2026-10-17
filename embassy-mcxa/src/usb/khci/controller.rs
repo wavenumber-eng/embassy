@@ -51,6 +51,8 @@ pub(super) struct Inner {
     pub reported_suspended: bool,
     pub reset_ack_pending: bool,
     pub paused_endpoints: Option<[u8; 16]>,
+    pub trace: [[u32; 4]; 64],
+    pub trace_count: usize,
 }
 
 impl Inner {
@@ -75,6 +77,15 @@ impl Inner {
             reported_suspended: false,
             reset_ack_pending: false,
             paused_endpoints: None,
+            trace: [[0; 4]; 64],
+            trace_count: 0,
+        }
+    }
+
+    pub fn record(&mut self, event: [u32; 4]) {
+        if self.trace_count < self.trace.len() {
+            self.trace[self.trace_count] = event;
+            self.trace_count += 1;
         }
     }
 
@@ -203,6 +214,7 @@ impl<B: Io> Engine<'_, B> {
 
     /// Engine is paused or the peripheral is freshly reset, and the FIFO is empty.
     pub fn reset_paused(&mut self) {
+        self.state.record([1, self.state.tokens, 0, 0]);
         self.state.notify();
         self.state.suspended = false;
         self.state.reported_suspended = false;
@@ -274,6 +286,7 @@ impl<B: Io> Engine<'_, B> {
         let control = ((length as u32) << 16) | DTS | if channel.data1 { DATA1 } else { 0 };
         self.io.barrier();
         self.storage.set_control(s, control | OWN);
+        self.state.record([3, index as u32, s as u32, control | OWN]);
         self.io.barrier();
         Some((id, generation))
     }
@@ -404,6 +417,8 @@ impl<B: Io> Engine<'_, B> {
             if length > PACKET {
                 return Err(self.fail(Fault::Length));
             }
+            self.state
+                .record([2, stat as u32, control, self.io.read(R::Ctl) as u32]);
             self.state.tokens = self.state.tokens.saturating_add(1);
             self.state.notify();
             if index == 0 {
@@ -415,6 +430,12 @@ impl<B: Io> Engine<'_, B> {
                         return Err(self.fail(Fault::Length));
                     }
                     self.storage.copy_out(s, &mut self.state.setup);
+                    self.state.record([
+                        4,
+                        u32::from_le_bytes(self.state.setup[..4].try_into().unwrap()),
+                        u32::from_le_bytes(self.state.setup[4..].try_into().unwrap()),
+                        0,
+                    ]);
                     self.state.setup_generation =
                         self.state.setup_generation.checked_add(1).expect("USB epoch exhausted");
                     self.state.setup_pending = true;

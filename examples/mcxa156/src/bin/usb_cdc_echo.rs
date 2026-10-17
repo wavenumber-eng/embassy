@@ -173,6 +173,14 @@ async fn monitor(mut uart: Lpuart<'static, Blocking>, mut led: Output<'static>) 
         }
     }
     uart.write_str_blocking("\r\n");
+    let (trace, count) = khci::diagnostic_trace();
+    for event in &trace[..count] {
+        uart.write_str_blocking("usb-trace");
+        for (name, value) in [" TYPE=", " A=", " B=", " C="].into_iter().zip(*event) {
+            print_word(&mut uart, name, value);
+        }
+        uart.write_str_blocking("\r\n");
+    }
     loop {
         led.toggle();
         Timer::after(Duration::from_millis(500)).await;
