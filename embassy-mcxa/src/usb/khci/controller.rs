@@ -546,17 +546,30 @@ impl<B: Io> Engine<'_, B> {
         let pending = self.io.read(R::Istat) & self.io.read(R::Inten);
         let mut reset = false;
         if pending & (RESET | TOKEN) != 0 {
-            self.pause_rx()?;
+            // Returned descriptors can be consumed while other endpoints run.
+            // Do not disable RX in ordinary TOKDNE service: the host may already
+            // be sending the next OUT/status transaction.
+            if pending & RESET != 0 {
+                self.pause_rx()?;
+            }
             let setup = self.drain()?;
             if self.io.read(R::Istat) & RESET != 0 {
+                self.pause_rx()?;
+                self.drain()?;
                 self.state.reset_ack_pending = true;
                 self.reset_paused();
                 self.state.events |= RESET_EVENT;
                 reset = true;
+                self.resume();
             } else if setup {
+                // Captured SETUP holds TOKEN_BUSY until preparation completes.
                 self.finish_setup_paused()?;
+                self.resume();
+            } else if self.state.paused_endpoints.is_some() {
+                self.resume();
             }
-            self.resume();
+            // With no handled SETUP, never clear TOKEN_BUSY. A newer SETUP
+            // arriving after the drain must retain its hardware hold for IRQ.
         }
         if !reset && pending & SLEEP != 0 {
             self.io.write(R::Istat, SLEEP);

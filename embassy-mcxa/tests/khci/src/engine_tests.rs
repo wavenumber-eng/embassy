@@ -21,6 +21,7 @@ struct Fake {
     reset_on_enable: bool,
     setup_on_endpoint_restore: bool,
     writes: Vec<(R, u8)>,
+    late_setup_on_empty: Option<u8>,
 }
 
 impl Fake {
@@ -41,6 +42,7 @@ impl Fake {
             reset_on_enable: false,
             setup_on_endpoint_restore: false,
             writes: Vec::new(),
+            late_setup_on_empty: None,
         }
     }
 }
@@ -51,7 +53,16 @@ impl Io for Fake {
             R::Ctl => self.ctl,
             R::Control => self.control,
             R::Addr => self.address,
-            R::Istat => self.flags | if self.fifo.is_empty() { 0 } else { TOKEN },
+            R::Istat => {
+                let value = self.flags | if self.fifo.is_empty() { 0 } else { TOKEN };
+                if self.fifo.is_empty()
+                    && let Some(stat) = self.late_setup_on_empty.take()
+                {
+                    self.fifo.push_back(stat);
+                    self.ctl |= 32;
+                }
+                value
+            }
             R::Inten => self.inten,
             R::Stat => *self.fifo.front().unwrap(),
             R::Endpoint(n) => self.endpoints[n],
@@ -686,4 +697,57 @@ fn tx_completion_during_rx_suspension_is_captured_before_another_publication() {
     e.begin(5, 1, Some(&[8]), None).unwrap();
     assert_eq!(e.state.channels[3].phase, Phase::Complete { id, length: 1 });
     assert!(e.io.fifo.is_empty());
+}
+
+#[test]
+fn ordinary_completion_irq_leaves_rx_acceptance_and_ctl_untouched() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[3].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    let (id, _) = e.begin(3, 1, Some(&[7]), None).unwrap();
+    complete(&mut e, 3, false, 1, 9);
+    e.io.writes.clear();
+    e.interrupt().unwrap();
+    assert_eq!(e.state.channels[3].phase, Phase::Complete { id, length: 1 });
+    assert!(
+        !e.io
+            .writes
+            .iter()
+            .any(|&(r, _)| r == R::Ctl || matches!(r, R::Endpoint(_)))
+    );
+}
+
+#[test]
+fn setup_after_final_empty_fifo_read_keeps_busy_for_the_next_irq() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[0].enabled = true;
+    state.channels[1].enabled = true;
+    state.channels[3].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.prime_out();
+    e.begin(3, 1, Some(&[7]), None).unwrap();
+    complete(&mut e, 3, false, 1, 9);
+    storage.copy_in(slot(0, false), &[0; 8]);
+    storage.set_control(slot(0, false), (8 << 16) | (13 << 2));
+    e.io.late_setup_on_empty = Some(0);
+    e.interrupt().unwrap();
+    assert_eq!(e.state.setup_generation, 0);
+    assert_ne!(e.io.ctl & 32, 0);
+    assert_eq!(e.io.fifo.len(), 1);
+    e.interrupt().unwrap();
+    assert_eq!(e.state.setup_generation, 1);
+    assert_eq!(e.io.ctl & 32, 0);
+    assert!(e.state.setup_pending);
 }
