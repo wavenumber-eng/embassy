@@ -44,8 +44,16 @@ const POLLS: usize = 1024;
 
 /// Experimental debug counters: reset bookkeeping, tokens, pauses and error interrupts.
 #[cfg(feature = "unstable-pac")]
-pub fn diagnostic_counters() -> [u32; 4] {
-    with_engine(|e| [e.state.resets, e.state.tokens, e.state.pauses, e.state.errors])
+pub fn diagnostic_counters() -> [u32; 5] {
+    with_engine(|e| {
+        [
+            e.state.resets,
+            e.state.tokens,
+            e.state.pauses,
+            e.state.errors,
+            e.state.error_bits as u32,
+        ]
+    })
 }
 
 /// Read-only bounded trace of the first controller events for bench diagnostics.

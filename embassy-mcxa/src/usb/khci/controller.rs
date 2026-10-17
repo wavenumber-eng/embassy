@@ -47,6 +47,7 @@ pub(super) struct Inner {
     pub tokens: u32,
     pub pauses: u32,
     pub errors: u32,
+    pub error_bits: u8,
     pub notifications: u64,
     pub suspended: bool,
     pub reported_suspended: bool,
@@ -74,6 +75,7 @@ impl Inner {
             tokens: 0,
             pauses: 0,
             errors: 0,
+            error_bits: 0,
             notifications: 0,
             suspended: false,
             reported_suspended: false,
@@ -568,6 +570,7 @@ impl<B: Io> Engine<'_, B> {
         if pending & ERROR != 0 {
             self.state.errors = self.state.errors.saturating_add(1);
             let errors = self.io.read(R::Errstat);
+            self.state.error_bits |= errors;
             self.io.write(R::Errstat, errors);
             self.io.write(R::Istat, ERROR);
         }

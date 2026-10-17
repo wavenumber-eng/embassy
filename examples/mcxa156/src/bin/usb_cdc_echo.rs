@@ -148,7 +148,7 @@ async fn monitor(mut uart: Lpuart<'static, Blocking>, mut led: Output<'static>) 
     print_snapshot(&mut uart, "clock-running", clock_snapshot());
     let counters = khci::diagnostic_counters();
     uart.write_str_blocking("usb-running");
-    for (name, value) in [" RESETS=", " TOKENS=", " PAUSES=", " ERRORS="]
+    for (name, value) in [" RESETS=", " TOKENS=", " PAUSES=", " ERRORS=", " ERROR_BITS="]
         .into_iter()
         .zip(counters)
     {
