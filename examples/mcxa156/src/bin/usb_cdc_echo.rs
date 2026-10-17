@@ -64,14 +64,18 @@ fn print_snapshot(uart: &mut Lpuart<'_, Blocking>, phase: &str, values: [u32; 13
     .into_iter()
     .zip(values)
     {
-        uart.write_str_blocking(name);
-        let mut hex = [0; 8];
-        for (i, b) in hex.iter_mut().enumerate() {
-            *b = b"0123456789abcdef"[((value >> (28 - i * 4)) & 15) as usize];
-        }
-        uart.blocking_write(&hex).unwrap();
+        print_word(uart, name, value);
     }
     uart.write_str_blocking("\r\n");
+}
+
+fn print_word(uart: &mut Lpuart<'_, Blocking>, name: &str, value: u32) {
+    uart.write_str_blocking(name);
+    let mut hex = [0; 8];
+    for (i, b) in hex.iter_mut().enumerate() {
+        *b = b"0123456789abcdef"[((value >> (28 - i * 4)) & 15) as usize];
+    }
+    uart.blocking_write(&hex).unwrap();
 }
 
 #[embassy_executor::main]
@@ -142,6 +146,33 @@ async fn echo(mut cdc: CdcAcmClass<'static, Driver<'static>>) {
 async fn monitor(mut uart: Lpuart<'static, Blocking>, mut led: Output<'static>) {
     Timer::after(Duration::from_secs(3)).await;
     print_snapshot(&mut uart, "clock-running", clock_snapshot());
+    let counters = khci::diagnostic_counters();
+    uart.write_str_blocking("usb-running");
+    for (name, value) in [" RESETS=", " TOKENS=", " PAUSES=", " ERRORS="]
+        .into_iter()
+        .zip(counters)
+    {
+        print_word(&mut uart, name, value);
+    }
+    let snapshot = cortex_m::interrupt::free(|_| {
+        let mrcc = hal::pac::MRCC0;
+        if !mrcc.mrcc_glb_cc0().read().usb0() || !mrcc.mrcc_glb_rst0().read().usb0() {
+            return None;
+        }
+        let usb = hal::pac::USB0;
+        Some([
+            usb.ctl().read().0 as u32,
+            usb.istat().read().0 as u32,
+            usb.addr().read().0 as u32,
+            usb.frmnuml().read().0 as u32,
+        ])
+    });
+    if let Some(snapshot) = snapshot {
+        for (name, value) in [" CTL=", " ISTAT=", " ADDR=", " FRAME="].into_iter().zip(snapshot) {
+            print_word(&mut uart, name, value);
+        }
+    }
+    uart.write_str_blocking("\r\n");
     loop {
         led.toggle();
         Timer::after(Duration::from_millis(500)).await;

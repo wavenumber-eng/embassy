@@ -42,6 +42,12 @@ static WAKERS: [AtomicWaker; 33] = [const { AtomicWaker::new() }; 33];
 const BUS: usize = 32;
 const POLLS: usize = 1024;
 
+/// Experimental debug counters: reset bookkeeping, tokens, pauses and error interrupts.
+#[cfg(feature = "unstable-pac")]
+pub fn diagnostic_counters() -> [u32; 4] {
+    with_engine(|e| [e.state.resets, e.state.tokens, e.state.pauses, e.state.errors])
+}
+
 /// Explicit bench configuration; automatic VBUS detection is not available.
 #[non_exhaustive]
 pub struct Config {
