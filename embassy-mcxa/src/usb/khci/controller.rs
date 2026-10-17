@@ -19,6 +19,7 @@ const ENABLE: u8 = 1;
 const ODDRST: u8 = 2;
 const TOKEN_BUSY: u8 = 32;
 const PULLUP: u8 = 16;
+#[cfg(test)]
 const ENDPOINT_ENABLES: u8 = 4 | 8;
 const POLLS: usize = 1024;
 const DRAIN: usize = 64;
@@ -51,6 +52,7 @@ pub(super) struct Inner {
     pub reported_suspended: bool,
     pub reset_ack_pending: bool,
     pub paused_endpoints: Option<[u8; 16]>,
+    pub pause_mask: [u8; 16],
     pub trace: [[u32; 4]; 64],
     pub trace_count: usize,
 }
@@ -77,6 +79,7 @@ impl Inner {
             reported_suspended: false,
             reset_ack_pending: false,
             paused_endpoints: None,
+            pause_mask: [0; 16],
             trace: [[0; 4]; 64],
             trace_count: 0,
         }
@@ -144,20 +147,35 @@ impl<B: Io> Engine<'_, B> {
     /// Disable endpoint token acceptance without disabling USB reset detection.
     /// The readback/drain boundary is an explicit bench engineering inference,
     /// not a documented DMA-idle handshake. Storage remains permanently private.
+    #[cfg(test)]
     pub fn pause(&mut self) -> Result<(), Fault> {
-        if self.state.paused_endpoints.is_some() {
-            return Ok(());
+        self.pause_with(ENDPOINT_ENABLES)
+    }
+
+    fn pause_rx(&mut self) -> Result<(), Fault> {
+        self.pause_with(8)
+    }
+
+    fn pause_with(&mut self, mask: u8) -> Result<(), Fault> {
+        if self.state.paused_endpoints.is_none() {
+            let mut endpoints = [0; 16];
+            for (n, saved) in endpoints.iter_mut().enumerate() {
+                *saved = self.io.read(R::Endpoint(n));
+            }
+            self.state.paused_endpoints = Some(endpoints);
         }
-        let mut endpoints = [0; 16];
-        for (n, saved) in endpoints.iter_mut().enumerate() {
-            *saved = self.io.read(R::Endpoint(n));
-            self.io.write(R::Endpoint(n), *saved & !ENDPOINT_ENABLES);
+        for stop in &mut self.state.pause_mask {
+            *stop |= mask;
         }
-        self.state.paused_endpoints = Some(endpoints);
-        for n in 0..16 {
+        let masks = self.state.pause_mask;
+        let endpoints = self.state.paused_endpoints.unwrap();
+        for (n, value) in endpoints.iter().enumerate() {
+            self.io.write(R::Endpoint(n), *value & !masks[n]);
+        }
+        for (n, mask) in masks.iter().enumerate() {
             let mut stopped = false;
             for _ in 0..POLLS {
-                if self.io.read(R::Endpoint(n)) & ENDPOINT_ENABLES == 0 {
+                if self.io.read(R::Endpoint(n)) & mask == 0 {
                     stopped = true;
                     break;
                 }
@@ -171,6 +189,19 @@ impl<B: Io> Engine<'_, B> {
         Ok(())
     }
 
+    fn pause_tx(&mut self, n: usize) -> Result<(), Fault> {
+        self.state.pause_mask[n] |= 4;
+        let value = self.read_endpoint(n) & !self.state.pause_mask[n];
+        self.io.write(R::Endpoint(n), value);
+        for _ in 0..POLLS {
+            if self.io.read(R::Endpoint(n)) & 4 == 0 {
+                self.io.barrier();
+                return Ok(());
+            }
+        }
+        Err(self.fail(Fault::StopTimeout))
+    }
+
     fn read_endpoint(&mut self, n: usize) -> u8 {
         match &self.state.paused_endpoints {
             Some(values) => values[n],
@@ -181,7 +212,7 @@ impl<B: Io> Engine<'_, B> {
     fn write_endpoint(&mut self, n: usize, value: u8) {
         if let Some(values) = &mut self.state.paused_endpoints {
             values[n] = value;
-            self.io.write(R::Endpoint(n), value & !ENDPOINT_ENABLES);
+            self.io.write(R::Endpoint(n), value & !self.state.pause_mask[n]);
         } else {
             self.io.write(R::Endpoint(n), value);
         }
@@ -203,6 +234,7 @@ impl<B: Io> Engine<'_, B> {
             self.state.reset_ack_pending = false;
         }
         if let Some(endpoints) = self.state.paused_endpoints.take() {
+            self.state.pause_mask = [0; 16];
             for (n, value) in endpoints.iter().enumerate().skip(1) {
                 self.io.write(R::Endpoint(n), *value);
             }
@@ -301,7 +333,7 @@ impl<B: Io> Engine<'_, B> {
         if !self.state.active || self.state.fault.is_some() {
             return None;
         }
-        self.pause().ok()?;
+        self.pause_rx().ok()?;
         self.account_paused().ok()?;
         let result = if setup.is_some_and(|g| g != self.state.setup_generation) {
             None
@@ -454,7 +486,12 @@ impl<B: Io> Engine<'_, B> {
         Err(self.fail(Fault::DrainTimeout))
     }
 
-    fn finish_setup_paused(&mut self) {
+    fn finish_setup_paused(&mut self) -> Result<(), Fault> {
+        // Device SETUP automatically holds token processing. Keep that latch
+        // until obsolete EP0 IN ownership is reclaimed and OUT is re-primed.
+        if self.io.read(R::Ctl) & TOKEN_BUSY == 0 {
+            return Err(self.fail(Fault::Ownership));
+        }
         for i in 0..2 {
             self.state.channels[i].reclaim_quiesced(false);
             self.state.channels[i].enabled = true;
@@ -466,6 +503,7 @@ impl<B: Io> Engine<'_, B> {
         self.state.out_packet = None;
         self.write_endpoint(0, 1 | 4 | 8);
         self.prime_out();
+        Ok(())
     }
 
     fn account_paused(&mut self) -> Result<(), Fault> {
@@ -475,7 +513,7 @@ impl<B: Io> Engine<'_, B> {
             self.reset_paused();
             self.state.events |= RESET_EVENT;
         } else if setup {
-            self.finish_setup_paused();
+            self.finish_setup_paused()?;
         }
         Ok(())
     }
@@ -487,7 +525,7 @@ impl<B: Io> Engine<'_, B> {
         if !self.state.active {
             return Ok(());
         }
-        self.pause()?;
+        self.pause_rx()?;
         self.account_paused()?;
         if self.state.setup_generation == generation {
             self.discard_out();
@@ -505,7 +543,7 @@ impl<B: Io> Engine<'_, B> {
         let pending = self.io.read(R::Istat) & self.io.read(R::Inten);
         let mut reset = false;
         if pending & (RESET | TOKEN) != 0 {
-            self.pause()?;
+            self.pause_rx()?;
             let setup = self.drain()?;
             if self.io.read(R::Istat) & RESET != 0 {
                 self.state.reset_ack_pending = true;
@@ -513,7 +551,7 @@ impl<B: Io> Engine<'_, B> {
                 self.state.events |= RESET_EVENT;
                 reset = true;
             } else if setup {
-                self.finish_setup_paused();
+                self.finish_setup_paused()?;
             }
             self.resume();
         }
@@ -544,16 +582,22 @@ impl<B: Io> Engine<'_, B> {
         if !self.state.active {
             return Ok(());
         }
-        self.pause()?;
+        self.pause_rx()?;
         self.state.notify();
-        let setup = self.drain()?;
+        let mut setup = self.drain()?;
+        if index % 2 == 1 && matches!(self.state.channels[index].phase, Phase::Published { .. }) {
+            // Only this IN endpoint needs stronger suspension to reclaim OWN.
+            // Preserve unrelated transmit acceptance, including EP0 status.
+            self.pause_tx(index / 2)?;
+            setup |= self.drain()?;
+        }
         if self.io.read(R::Istat) & RESET != 0 {
             self.state.reset_ack_pending = true;
             self.reset_paused();
             self.state.events |= RESET_EVENT;
         } else {
             if setup {
-                self.finish_setup_paused();
+                self.finish_setup_paused()?;
             }
             let channel = &mut self.state.channels[index];
             channel.reclaim_quiesced(false);
@@ -583,14 +627,14 @@ impl<B: Io> Engine<'_, B> {
         if !self.state.active {
             return Ok(());
         }
-        self.pause()?;
+        self.pause_rx()?;
         let setup = self.drain()?;
         if self.io.read(R::Istat) & RESET != 0 {
             self.state.reset_ack_pending = true;
             self.reset_paused();
             self.state.events |= RESET_EVENT;
         } else if setup {
-            self.finish_setup_paused();
+            self.finish_setup_paused()?;
         } else if self.state.setup_generation == generation {
             self.io.write(R::Addr, address & 127);
         }

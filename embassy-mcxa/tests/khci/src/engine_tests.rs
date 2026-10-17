@@ -60,14 +60,15 @@ impl Io for Fake {
     }
     fn write(&mut self, r: R, value: u8) {
         self.writes.push((r, value));
-        if r == R::Endpoint(0) && value & 12 != 0 && self.setup_on_endpoint_restore {
+        if r == R::Endpoint(0) && value & 8 != 0 && self.setup_on_endpoint_restore {
             self.ctl |= 32;
         }
         if matches!(r, R::Endpoint(_))
-            && value & 12 == 0
+            && value & 8 == 0
             && let Some(stat) = self.token_on_endpoint_disable.take()
         {
             self.fifo.push_back(stat);
+            self.ctl |= 32;
         }
         if r == R::Ctl && value & 1 != 0 && self.ctl & 1 == 0 && self.reset_on_enable {
             self.flags |= RESET;
@@ -77,7 +78,7 @@ impl Io for Fake {
             R::Control => self.control = value,
             R::Addr => self.address = value,
             R::Inten => self.inten = value,
-            R::Endpoint(n) if !self.ignore_stop || value & 12 != 0 => self.endpoints[n] = value,
+            R::Endpoint(n) if !self.ignore_stop || value & 8 != 0 => self.endpoints[n] = value,
             R::Istat => {
                 self.acknowledgments.push(value);
                 self.flags &= !value;
@@ -98,6 +99,9 @@ impl Io for Fake {
 }
 
 fn complete(e: &mut Engine<'_, Fake>, index: usize, odd: bool, length: usize, pid: u8) {
+    if pid == 13 {
+        e.io.ctl |= 32;
+    }
     e.storage
         .set_control(slot(index, odd), ((length as u32) << 16) | ((pid as u32) << 2));
     e.io.fifo
@@ -568,8 +572,118 @@ fn resume_clears_old_busy_before_acceptance_and_preserves_a_new_setup_busy_latch
     let restore =
         e.io.writes
             .iter()
-            .position(|&(r, v)| matches!(r, R::Endpoint(_)) && v & 12 != 0)
+            .position(|&(r, v)| matches!(r, R::Endpoint(_)) && v & 8 != 0)
             .unwrap();
     assert!(clear < restore);
     assert_eq!(e.io.writes.last(), Some(&(R::Endpoint(0), 13)));
+}
+
+#[test]
+fn normal_publication_preserves_all_existing_tx_enables() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[3].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.begin(3, 1, Some(&[7]), None).unwrap();
+    e.set_address(0, 42).unwrap();
+    e.reject(0).unwrap();
+    e.endpoint(4, true, false).unwrap();
+    for &(register, value) in &e.io.writes {
+        if let R::Endpoint(n) = register
+            && n != 2
+        {
+            assert_ne!(value & 4, 0);
+        }
+    }
+}
+
+#[test]
+fn stronger_pause_upgrades_rx_only_stop_without_losing_desired_values() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.paused_endpoints = Some([13; 16]);
+    state.pause_mask = [8; 16];
+    let mut fake = Fake::new();
+    fake.endpoints = [5; 16];
+    let mut e = Engine {
+        io: fake,
+        state: &mut state,
+        storage: &storage,
+    };
+    e.pause().unwrap();
+    assert!(e.io.endpoints.iter().all(|v| v & 12 == 0));
+    assert_eq!(e.state.paused_endpoints, Some([13; 16]));
+    assert_eq!(e.state.pause_mask, [12; 16]);
+}
+
+#[test]
+fn setup_without_hardware_busy_latch_fails_before_old_in_reclamation() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[0].enabled = true;
+    state.channels[1].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.prime_out();
+    e.begin(1, 1, Some(&[7]), Some(0)).unwrap();
+    storage.copy_in(slot(0, false), &[0; 8]);
+    complete(&mut e, 0, false, 8, 13);
+    e.io.ctl &= !32;
+    assert_eq!(e.interrupt(), Err(Fault::Ownership));
+    assert_ne!(storage.control(slot(1, false)) & OWN, 0);
+    assert!(!e.state.active);
+}
+
+#[test]
+fn cancelling_owned_in_stops_only_its_tx_and_preserves_unrelated_tx() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[3].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.begin(3, 1, Some(&[7]), None).unwrap();
+    e.io.writes.clear();
+    e.endpoint(3, false, false).unwrap();
+    for &(register, value) in &e.io.writes {
+        if let R::Endpoint(n) = register
+            && n != 1
+        {
+            assert_ne!(value & 4, 0);
+        }
+    }
+    assert_eq!(storage.control(slot(3, false)) & OWN, 0);
+}
+
+#[test]
+fn tx_completion_during_rx_suspension_is_captured_before_another_publication() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[3].enabled = true;
+    state.channels[5].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    let (id, _) = e.begin(3, 1, Some(&[7]), None).unwrap();
+    storage.set_control(slot(3, false), (1 << 16) | (9 << 2));
+    e.io.token_on_endpoint_disable = Some(0x18);
+    e.begin(5, 1, Some(&[8]), None).unwrap();
+    assert_eq!(e.state.channels[3].phase, Phase::Complete { id, length: 1 });
+    assert!(e.io.fifo.is_empty());
 }
