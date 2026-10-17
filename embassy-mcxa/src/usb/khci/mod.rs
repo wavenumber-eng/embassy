@@ -159,8 +159,9 @@ pub struct InterruptHandler;
 
 impl interrupt::typelevel::Handler<interrupt::typelevel::USB0> for InterruptHandler {
     unsafe fn on_interrupt() {
+        // with_engine wakes after the critical section when an event changed.
+        // Error-only/NAK interrupts must not continually reschedule all tasks.
         let result = with_engine(|e| e.interrupt());
-        wake_all();
         assert!(result.is_ok(), "KHCI controller fault: {:?}", result);
     }
 }
