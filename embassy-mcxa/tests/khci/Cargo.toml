@@ -1,0 +1,13 @@
+[package]
+name = "embassy-mcxa-khci-tests"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+critical-section = { version = "1.2", features = ["std"] }
+embassy-sync = { path = "../../../embassy-sync" }
+embassy-usb-driver = { path = "../../../embassy-usb-driver" }

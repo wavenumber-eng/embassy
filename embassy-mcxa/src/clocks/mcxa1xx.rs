@@ -17,6 +17,8 @@ mod firc48;
 mod gate;
 #[path = "types.rs"]
 mod types;
+#[path = "mcxa1xx/usbfs.rs"]
+pub(crate) mod usbfs;
 
 pub(crate) use gate::default_register_value;
 pub use gate::{Gate, assert_reset, disable, enable, enable_and_reset, is_reset_released, pulse_reset, release_reset};

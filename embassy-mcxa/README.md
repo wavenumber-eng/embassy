@@ -18,13 +18,24 @@ For peripheral clock preparation, set `config.clock_cfg.enable_firc48m = true`
 before `embassy_mcxa::init(config)`. This enables the nominal fixed 48 MHz
 FIRC output while preserving the 12 MHz system clock and an already running
 FIRC's frequency configuration. It does not enable USB0, establish USB clock
-tolerance, or provide a native USB driver. The option defaults to `false`.
+tolerance, or construct a native USB driver. The option defaults to `false`.
 The FIRC startup protocol has a bounded readiness poll and reports faults;
 the existing SIRC initialization wait is unchanged.
 
 This USB development branch temporarily pins the reviewed USB0 metadata in
 the Wavenumber PAC fork. Replace that dependency with its upstream revision
 before requesting upstream review; base support uses the merged upstream PAC.
+
+The USB development branch includes experimental `usb::khci` support for
+exact MCXA156. `Config::assume_vbus_present()` explicitly selects a bench
+policy without VBUS detection. With independent debug power, keep native USB
+connected to a powered host while enabled and disable before unplugging it.
+The driver uses private static DMA bounce buffers and unique endpoint numbers
+across directions; it supports full-speed bulk/interrupt endpoints through
+64 bytes. It rejects isochronous endpoints, and reports force-reset and remote
+wakeup as unsupported. Operating-range clock qualification and unrestricted
+hotplug remain pending. See `examples/mcxa156/src/bin/usb_cdc_echo.rs` and the
+native contract harness under `embassy-mcxa/tests/khci`.
 
 Dedicated pins are excluded from safe HAL pin tokens unless their feature is
 enabled. Opted-in pins are initialized in the disabled GPIO state, consistent

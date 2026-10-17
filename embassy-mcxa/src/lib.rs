@@ -91,6 +91,8 @@ pub mod sgi;
 pub mod spi;
 #[cfg(mcxa_trng)]
 pub mod trng;
+#[cfg(feature = "mcxa156")]
+pub mod usb;
 #[cfg(mcxa_wwdt)]
 pub mod wwdt;
 
