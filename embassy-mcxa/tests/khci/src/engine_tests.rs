@@ -17,8 +17,10 @@ struct Fake {
     reset_after_ack: bool,
     barriers: usize,
     acknowledgments: Vec<u8>,
-    token_on_ctl_write: Option<u8>,
+    token_on_endpoint_disable: Option<u8>,
     reset_on_enable: bool,
+    setup_on_endpoint_restore: bool,
+    writes: Vec<(R, u8)>,
 }
 
 impl Fake {
@@ -29,14 +31,16 @@ impl Fake {
             flags: 0,
             control: 16,
             address: 37,
-            endpoints: [0; 16],
+            endpoints: [13; 16],
             fifo: VecDeque::new(),
             ignore_stop: false,
             reset_after_ack: false,
             barriers: 0,
             acknowledgments: Vec::new(),
-            token_on_ctl_write: None,
+            token_on_endpoint_disable: None,
             reset_on_enable: false,
+            setup_on_endpoint_restore: false,
+            writes: Vec::new(),
         }
     }
 }
@@ -55,8 +59,13 @@ impl Io for Fake {
         }
     }
     fn write(&mut self, r: R, value: u8) {
-        if r == R::Ctl
-            && let Some(stat) = self.token_on_ctl_write.take()
+        self.writes.push((r, value));
+        if r == R::Endpoint(0) && value & 12 != 0 && self.setup_on_endpoint_restore {
+            self.ctl |= 32;
+        }
+        if matches!(r, R::Endpoint(_))
+            && value & 12 == 0
+            && let Some(stat) = self.token_on_endpoint_disable.take()
         {
             self.fifo.push_back(stat);
         }
@@ -68,7 +77,7 @@ impl Io for Fake {
             R::Control => self.control = value,
             R::Addr => self.address = value,
             R::Inten => self.inten = value,
-            R::Endpoint(n) => self.endpoints[n] = value,
+            R::Endpoint(n) if !self.ignore_stop || value & 12 != 0 => self.endpoints[n] = value,
             R::Istat => {
                 self.acknowledgments.push(value);
                 self.flags &= !value;
@@ -372,7 +381,7 @@ fn setup_arriving_at_publication_boundary_prevents_old_in_own() {
     e.prime_out();
     storage.copy_in(slot(0, false), &[0; 8]);
     storage.set_control(slot(0, false), (8 << 16) | (13 << 2));
-    e.io.token_on_ctl_write = Some(0);
+    e.io.token_on_endpoint_disable = Some(0);
     let notifications = e.state.notifications;
     assert!(e.begin(1, 7, Some(&[9; 7]), Some(0)).is_none());
     assert_eq!(storage.control(slot(1, false)) & OWN, 0);
@@ -496,7 +505,7 @@ fn recognized_reset_is_acknowledged_after_enable_without_reentering_reset_servic
 }
 
 #[test]
-fn ordinary_publication_does_not_hide_a_new_reset_generated_after_resume() {
+fn ordinary_publication_keeps_usb_enabled_without_generating_a_reset() {
     let storage = Storage::new();
     let mut state = Inner::new();
     state.active = true;
@@ -509,6 +518,58 @@ fn ordinary_publication_does_not_hide_a_new_reset_generated_after_resume() {
     };
     e.io.reset_on_enable = true;
     assert!(e.begin(3, 0, Some(&[]), None).is_some());
-    assert_ne!(e.io.flags & RESET, 0, "unobserved resets must remain visible");
+    assert_eq!(e.io.flags & RESET, 0, "endpoint updates must not toggle USB enable");
+    assert_eq!(e.io.ctl & 1, 1);
     assert_eq!(e.state.events & RESET_EVENT, 0);
+}
+
+#[test]
+fn pause_is_idempotent_and_endpoint_changes_remain_disabled_until_resume() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.pause().unwrap();
+    let shadow = e.state.paused_endpoints;
+    e.pause().unwrap();
+    assert_eq!(e.state.paused_endpoints, shadow);
+    assert!(e.io.endpoints.iter().all(|v| v & 12 == 0));
+    assert_eq!(e.io.ctl & 1, 1);
+    e.endpoint(2, true, true).unwrap();
+    assert_eq!(e.io.endpoints[1], 1 | 16 | 8 | 2);
+    assert_eq!(e.io.endpoints[0], 13);
+    assert!(e.state.paused_endpoints.is_none());
+}
+
+#[test]
+fn resume_clears_old_busy_before_acceptance_and_preserves_a_new_setup_busy_latch() {
+    let storage = Storage::new();
+    let mut state = Inner::new();
+    state.active = true;
+    state.channels[3].enabled = true;
+    let mut e = Engine {
+        io: Fake::new(),
+        state: &mut state,
+        storage: &storage,
+    };
+    e.io.ctl = 33;
+    e.io.setup_on_endpoint_restore = true;
+    e.begin(3, 0, Some(&[]), None).unwrap();
+    assert_eq!(e.io.ctl & 33, 33, "new SETUP latch must survive resume");
+    let clear =
+        e.io.writes
+            .iter()
+            .position(|&(r, v)| r == R::Ctl && v & 32 == 0)
+            .unwrap();
+    let restore =
+        e.io.writes
+            .iter()
+            .position(|&(r, v)| matches!(r, R::Endpoint(_)) && v & 12 != 0)
+            .unwrap();
+    assert!(clear < restore);
+    assert_eq!(e.io.writes.last(), Some(&(R::Endpoint(0), 13)));
 }

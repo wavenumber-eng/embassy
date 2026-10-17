@@ -19,6 +19,7 @@ const ENABLE: u8 = 1;
 const ODDRST: u8 = 2;
 const TOKEN_BUSY: u8 = 32;
 const PULLUP: u8 = 16;
+const ENDPOINT_ENABLES: u8 = 4 | 8;
 const POLLS: usize = 1024;
 const DRAIN: usize = 64;
 
@@ -49,6 +50,7 @@ pub(super) struct Inner {
     pub suspended: bool,
     pub reported_suspended: bool,
     pub reset_ack_pending: bool,
+    pub paused_endpoints: Option<[u8; 16]>,
 }
 
 impl Inner {
@@ -72,6 +74,7 @@ impl Inner {
             suspended: false,
             reported_suspended: false,
             reset_ack_pending: false,
+            paused_endpoints: None,
         }
     }
 
@@ -127,17 +130,50 @@ impl<B: Io> Engine<'_, B> {
         fault
     }
 
+    /// Disable endpoint token acceptance without disabling USB reset detection.
+    /// The readback/drain boundary is an explicit bench engineering inference,
+    /// not a documented DMA-idle handshake. Storage remains permanently private.
     pub fn pause(&mut self) -> Result<(), Fault> {
-        let ctl = self.io.read(R::Ctl);
-        self.io.write(R::Ctl, ctl & !ENABLE);
-        for _ in 0..POLLS {
-            if self.io.read(R::Ctl) & ENABLE == 0 {
-                self.io.barrier();
-                self.state.pauses = self.state.pauses.saturating_add(1);
-                return Ok(());
+        if self.state.paused_endpoints.is_some() {
+            return Ok(());
+        }
+        let mut endpoints = [0; 16];
+        for (n, saved) in endpoints.iter_mut().enumerate() {
+            *saved = self.io.read(R::Endpoint(n));
+            self.io.write(R::Endpoint(n), *saved & !ENDPOINT_ENABLES);
+        }
+        self.state.paused_endpoints = Some(endpoints);
+        for n in 0..16 {
+            let mut stopped = false;
+            for _ in 0..POLLS {
+                if self.io.read(R::Endpoint(n)) & ENDPOINT_ENABLES == 0 {
+                    stopped = true;
+                    break;
+                }
+            }
+            if !stopped {
+                return Err(self.fail(Fault::StopTimeout));
             }
         }
-        Err(self.fail(Fault::StopTimeout))
+        self.io.barrier();
+        self.state.pauses = self.state.pauses.saturating_add(1);
+        Ok(())
+    }
+
+    fn read_endpoint(&mut self, n: usize) -> u8 {
+        match &self.state.paused_endpoints {
+            Some(values) => values[n],
+            None => self.io.read(R::Endpoint(n)),
+        }
+    }
+
+    fn write_endpoint(&mut self, n: usize, value: u8) {
+        if let Some(values) = &mut self.state.paused_endpoints {
+            values[n] = value;
+            self.io.write(R::Endpoint(n), value & !ENDPOINT_ENABLES);
+        } else {
+            self.io.write(R::Endpoint(n), value);
+        }
     }
 
     fn resume(&mut self) {
@@ -146,14 +182,22 @@ impl<B: Io> Engine<'_, B> {
         }
         self.io.barrier();
         let ctl = self.io.read(R::Ctl);
+        // Clear the SETUP token-busy latch BEFORE restoring endpoint acceptance.
+        // A newer SETUP arriving after restoration must retain its own latch.
         self.io.write(R::Ctl, (ctl | ENABLE) & !TOKEN_BUSY);
         self.io.barrier();
-        // The SDK acknowledges reset with USB enabled. Do not suppress new
-        // post-resume resets unless this operation actually observed USBRST.
         if self.state.reset_ack_pending {
             self.io.write(R::Istat, RESET);
             self.io.barrier();
             self.state.reset_ack_pending = false;
+        }
+        if let Some(endpoints) = self.state.paused_endpoints.take() {
+            for (n, value) in endpoints.iter().enumerate().skip(1) {
+                self.io.write(R::Endpoint(n), *value);
+            }
+            self.io.barrier();
+            self.io.write(R::Endpoint(0), endpoints[0]);
+            self.io.barrier();
         }
     }
 
@@ -178,12 +222,12 @@ impl<B: Io> Engine<'_, B> {
             c.enabled = i < 2;
         }
         for n in 0..16 {
-            self.io.write(R::Endpoint(n), 0);
+            self.write_endpoint(n, 0);
         }
         self.io.write(R::Ctl, ctl);
         self.io.write(R::Errstat, 0xff);
         self.io.write(R::Erren, 0xff);
-        self.io.write(R::Endpoint(0), 1 | 4 | 8);
+        self.write_endpoint(0, 1 | 4 | 8);
         self.prime_out();
         self.state.resets = self.state.resets.saturating_add(1);
     }
@@ -399,7 +443,7 @@ impl<B: Io> Engine<'_, B> {
             }
         }
         self.state.out_packet = None;
-        self.io.write(R::Endpoint(0), 1 | 4 | 8);
+        self.write_endpoint(0, 1 | 4 | 8);
         self.prime_out();
     }
 
@@ -426,8 +470,8 @@ impl<B: Io> Engine<'_, B> {
         self.account_paused()?;
         if self.state.setup_generation == generation {
             self.discard_out();
-            let value = self.io.read(R::Endpoint(0));
-            self.io.write(R::Endpoint(0), value | 2);
+            let value = self.read_endpoint(0);
+            self.write_endpoint(0, value | 2);
         }
         self.resume();
         Ok(())
@@ -505,7 +549,7 @@ impl<B: Io> Engine<'_, B> {
                 | if out.enabled { 8 } else { 0 }
                 | if input.enabled { 4 } else { 0 }
                 | if out.stalled || input.stalled { 2 } else { 0 };
-            self.io.write(R::Endpoint(n), value);
+            self.write_endpoint(n, value);
         }
         self.resume();
         Ok(())
