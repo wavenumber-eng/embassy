@@ -15,6 +15,7 @@ old publication/rejection, reject recovery, bounded reset, and suspend/reset
 event coalescing. The ARM PAC adapter additionally requires an ARM build.
 
 This manual lane does not replace hardware tests or establish the engine-stop
-engineering inference experimentally. The bench driver pauses RX/TX endpoint
-acceptance while preserving USB enable; readback/drain is not a separately
+engineering inference experimentally. Normal completion/publication keeps endpoint acceptance live and uses the
+checked SETUP hold. Address changes retain RX suspension; actual owned-IN
+cancellation suspends only its TX while preserving USB enable; readback/drain is not a separately
 documented in-flight DMA-idle acknowledgment. Shared CI changes are a separate scope.

@@ -67,8 +67,17 @@ native CDC identity is laboratory VID:PID `cafe:1560`, serial
 `WN-META-A156-0001`; this is not a production identity allocation. The example
 echoes native packets, blinks green and sends pre/post/running clock snapshots
 over the debug probe UART. Its native COM port is distinct from probe VCOM.
-The CPU remains at the 12 MHz startup clock; USB opts into a separate nominal
-48 MHz FIRC output without speculative SOF trim changes.
+The USB clock option preserves the incoming system clock and enables the
+separate nominal 48 MHz output without speculative SOF trim. Retain actual
+clock snapshots: a probe-created boot state can already select 48 MHz FIRC,
+while the minimal HAL clock model assumes the 12 MHz bootstrap state.
+
+The echo runs receive and transmit concurrently through a bounded 32-packet
+queue, retaining ZLP termination for full packets. Sequential write-then-read
+bursts through 1,024 bytes are covered by the bench test. For larger streams,
+run the host reader concurrently so bounded USB backpressure can progress.
+This development example retains periodic UART diagnostics, which temporarily
+delay thread-mode USB polling; it is not a throughput benchmark.
 
 Initial checks should retain descriptors/host driver, exact byte patterns over
 1/7/63/64/65/127/128/257/1024-byte boundaries, repeated transactions and warm

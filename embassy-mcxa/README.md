@@ -16,8 +16,10 @@ The examples are under `examples/mcxa156`; probe VCOM is UART, not native USB.
 
 For peripheral clock preparation, set `config.clock_cfg.enable_firc48m = true`
 before `embassy_mcxa::init(config)`. This enables the nominal fixed 48 MHz
-FIRC output while preserving the 12 MHz system clock and an already running
-FIRC's frequency configuration. It does not enable USB0, establish USB clock
+FIRC output while preserving the incoming system clock and an already running
+FIRC's frequency configuration. The minimal clock model assumes the 12 MHz
+bootstrap state; capture actual clock state when a debugger or boot stage
+may have selected a different source. It does not enable USB0, establish USB clock
 tolerance, or construct a native USB driver. The option defaults to `false`.
 The FIRC startup protocol has a bounded readiness poll and reports faults;
 the existing SIRC initialization wait is unchanged.
