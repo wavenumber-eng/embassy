@@ -7,7 +7,10 @@
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
+use embassy_futures::select::select;
 use embassy_mcxa as hal;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::device::{CdcAcmClass, State as CdcState};
 use embassy_usb::{Builder, Config};
@@ -124,19 +127,39 @@ async fn main(_spawner: Spawner) {
     join3(device.run(), echo(cdc), monitor(uart, led)).await;
 }
 
-async fn echo(mut cdc: CdcAcmClass<'static, Driver<'static>>) {
-    let mut data = [0; 64];
+async fn echo(cdc: CdcAcmClass<'static, Driver<'static>>) {
+    let (mut sender, mut receiver) = cdc.split();
+    // Keep receiving while an IN packet/ZLP awaits host polling. The bounded
+    // queue absorbs short write-then-read bursts; larger streams need a host
+    // reader running concurrently so normal USB backpressure can make progress.
+    let packets: Channel<NoopRawMutex, ([u8; 64], usize), 32> = Channel::new();
     loop {
-        cdc.wait_connection().await;
-        loop {
-            let length = match cdc.read_packet(&mut data).await {
-                Ok(length) => length,
-                Err(_) => break,
-            };
-            if cdc.write_packet(&data[..length]).await.is_err() {
-                break;
+        receiver.wait_connection().await;
+        packets.clear();
+        let receive = async {
+            loop {
+                let mut data = [0; 64];
+                let length = match receiver.read_packet(&mut data).await {
+                    Ok(length) => length,
+                    Err(_) => break,
+                };
+                packets.send((data, length)).await;
             }
-        }
+        };
+        let send = async {
+            loop {
+                let (data, length) = packets.receive().await;
+                if sender.write_packet(&data[..length]).await.is_err() {
+                    break;
+                }
+                if length == 64 && sender.write_packet(&[]).await.is_err() {
+                    break;
+                }
+            }
+        };
+        // A disconnect in either direction cancels its peer before queued
+        // application bytes are cleared for the next enabled USB connection.
+        select(receive, send).await;
     }
 }
 

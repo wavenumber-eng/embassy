@@ -15,6 +15,7 @@ embassy-mcxa = { version = "0.1.0", path = "../../embassy-mcxa", default-feature
 embassy-time = { version = "0.5.1", path = "../../embassy-time", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-futures = { version = "0.1.2", path = "../../embassy-futures" }
 embassy-usb = { version = "0.6.0", path = "../../embassy-usb", features = ["defmt"] }
+embassy-sync = { version = "0.8.0", path = "../../embassy-sync" }
 static_cell = "2"
 panic-probe = { version = "1.0", features = ["print-defmt"] }
 
